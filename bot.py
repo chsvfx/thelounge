@@ -3,16 +3,15 @@ from discord.ext import commands, tasks
 from discord import app_commands
 from datetime import datetime, timezone
 import os
-import psutil
 import traceback
-import asyncio
+import psutil
 
 # ===================== CONFIG =====================
 GUILD_ID = 1351310078849847358
 MEMBER_ROLE_ID = 1386784222781505619
 
 ALLOWED_USER_IDS = [1351310078887858299, 1386779868532047982]
-PROTECTED_IDS = [1351310078887858299, 1386779868532047982]
+PROTECTED_IDS = [1351310078887858299, 1386779868532047982]  # for anti-tag
 
 SYSTEM_LOG_CHANNEL_ID = 1462412675295481971
 VERIFY_LOG_CHANNEL_ID = 1462412645150752890
@@ -36,9 +35,10 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ===================== MEMORY =====================
+RECENT_LEAVES = {}
 START_TIME = datetime.now(timezone.utc)
 status_message: discord.Message | None = None
-invite_tracker = {}
+invite_tracker = {}  # Invite tracking
 persistent_views_added = False
 
 # ===================== HELPERS =====================
@@ -71,6 +71,7 @@ async def send_embed(channel_id: int, title: str, color=discord.Color.green(),
         embed.set_thumbnail(url=thumbnail)
     await channel.send(embed=embed)
 
+# ===================== STATUS EMBED =====================
 async def get_status_embed() -> discord.Embed:
     guild = bot.get_guild(GUILD_ID)
     total_members = sum(1 for m in guild.members if not m.bot) if guild else 0
@@ -94,7 +95,7 @@ async def get_status_embed() -> discord.Embed:
     embed.set_footer(text=f"{bot.user} • Status Update")
     return embed
 
-# ===================== VIEWS =====================
+# ===================== VERIFY VIEW =====================
 class VerifyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -110,7 +111,6 @@ class VerifyView(discord.ui.View):
             return
         await interaction.user.add_roles(role, reason="Server verification")
         await interaction.response.send_message("✅ You are now verified!", ephemeral=True)
-        # Send log
         await send_embed(
             VERIFY_LOG_CHANNEL_ID,
             "✅ Member Verified",
@@ -123,99 +123,94 @@ class VerifyView(discord.ui.View):
             thumbnail=interaction.user.display_avatar.url
         )
 
+# ===================== TICKET VIEW =====================
 class TicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="🎫 Open Ticket", style=discord.ButtonStyle.primary, custom_id="persistent_ticket_button")
-    async def ticket_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        overwrites = {
-            interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        }
-        category = interaction.guild.get_channel(TICKET_CATEGORY_ID)
-        channel = await interaction.guild.create_text_channel(
-            f"ticket-{interaction.user.name}", category=category, overwrites=overwrites
-        )
-        await interaction.response.send_message(f"🎟️ Your ticket has been created: {channel.mention}", ephemeral=True)
+    @discord.ui.button(label="🎫 Create Ticket", style=discord.ButtonStyle.primary, custom_id="persistent_ticket_button")
+    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Check if ticket already exists
+        existing = discord.utils.get(interaction.guild.categories, id=TICKET_CATEGORY_ID)
+        if not existing:
+            await interaction.response.send_message("❌ Ticket category not found.", ephemeral=True)
+            return
+        channel_name = f"ticket-{interaction.user.name}".lower()
+        channel = await interaction.guild.create_text_channel(channel_name, category=existing, reason="Ticket Created")
+        await channel.set_permissions(interaction.guild.default_role, send_messages=False, read_messages=False)
+        await channel.set_permissions(interaction.user, send_messages=True, read_messages=True)
+        await interaction.response.send_message(f"🎟️ Ticket created: {channel.mention}", ephemeral=True)
+        await channel.send(f"🎫 {interaction.user.mention}, welcome! Describe your issue here. Our staff will assist you shortly.")
 
 # ===================== EVENTS =====================
 @bot.event
 async def on_ready():
-    global persistent_views_added, invite_tracker, status_message
+    global persistent_views_added, status_message
     if not persistent_views_added:
         bot.add_view(VerifyView())
         bot.add_view(TicketView())
         persistent_views_added = True
+    await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
+    update_status.start()
 
     guild = bot.get_guild(GUILD_ID)
     if guild:
         for invite in await guild.invites():
             invite_tracker[invite.code] = invite.uses
 
-    # Sync commands
-    await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
-    print(f"🟢 Logged in as {bot.user} | Commands synced")
-
-    # Send status message if not exists
+    # Send status message if missing
     channel = get_channel_safe(BOT_STATUS_CHANNEL_ID)
     if channel:
         try:
-            messages = [m async for m in channel.history(limit=50)]
-            status_message = next((m for m in messages if m.author == bot.user), None)
-            if not status_message:
+            if status_message is None:
                 status_message = await channel.send(embed=await get_status_embed())
         except Exception as e:
-            print(f"❌ Failed to fetch/send status message: {e}")
+            print(f"❌ Status message failed: {e}")
 
-# ===================== LOGGING =====================
-def calculate_risk(member: discord.Member) -> str:
-    # Simple risk example: new accounts under 7 days are risky
-    age_days = (datetime.now(timezone.utc) - member.created_at).days
-    if age_days < 7:
-        return "⚠️ High (New Account)"
-    elif age_days < 30:
-        return "⚠️ Medium"
-    return "✅ Low"
+    print(f"🟢 Logged in as {bot.user}")
 
 @bot.event
-async def on_member_join(member: discord.Member):
-    guild = member.guild
+async def on_error(event, *args, **kwargs):
+    err = traceback.format_exc()
+    await send_embed(SYSTEM_LOG_CHANNEL_ID, "⚠️ System Error", color=discord.Color.red(),
+                     fields=[("", f"```{err}```", False)])
+    print(err)
+
+# ===================== JOIN / LEAVE LOGGING =====================
+@bot.event
+async def on_member_join(member):
     inviter_name = "Unknown"
-    invite_used = "Unknown"
     try:
         invites_before = invite_tracker.copy()
-        current_invites = await guild.invites()
-        for inv in current_invites:
+        for inv in await member.guild.invites():
             uses_before = invites_before.get(inv.code, 0)
             if inv.uses > uses_before:
                 inviter_name = inv.inviter.mention
-                invite_used = inv.code
                 invite_tracker[inv.code] = inv.uses
                 break
     except Exception:
         pass
 
-    embed = discord.Embed(
-        title="🟢 Member Joined",
-        color=discord.Color.green(),
-        timestamp=datetime.now(timezone.utc)
-    )
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="👤 User", value=f"{member.mention}\n`{member.id}`", inline=False)
+    embed = discord.Embed(title="🟢 Member Joined", color=discord.Color.green(), timestamp=datetime.now(timezone.utc))
+    embed.add_field(name="👤 User", value=f"{member} (`{member.id}`)", inline=False)
     embed.add_field(name="📅 Account Age", value=format_account_age(member.created_at), inline=False)
-    embed.add_field(name="📥 Invite Used", value=f"{invite_used}", inline=False)
-    embed.add_field(name="⚡ Invited By", value=inviter_name, inline=False)
-    embed.add_field(name="📊 Risk Score", value=calculate_risk(member), inline=False)
     embed.add_field(name="🕒 Account Created", value=f"<t:{int(member.created_at.timestamp())}:F>", inline=False)
-    await send_embed(JOIN_LOG_CHANNEL_ID, embed.title, color=discord.Color.green(),
-                     fields=[(f.name, f.value, f.inline) for f in embed.fields], thumbnail=member.display_avatar.url)
+    embed.add_field(name="📥 Invite Used", value=inviter_name, inline=False)
+    # You can add risk score / alt detection here
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await send_embed(JOIN_LOG_CHANNEL_ID, embed.title, color=discord.Color.green(), fields=[
+        ("👤 User", f"{member.mention}\n`{member.id}`", False),
+        ("📅 Account Age", format_account_age(member.created_at), False),
+        ("🕒 Account Created", f"<t:{int(member.created_at.timestamp())}:F>", False),
+        ("📥 Invite Used", inviter_name, False)
+    ], thumbnail=member.display_avatar.url)
 
 @bot.event
-async def on_member_remove(member: discord.Member):
-    guild = member.guild
+async def on_member_remove(member):
     reason = "Left voluntarily"
     mod = None
+    guild = member.guild
+
     async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.kick):
         if entry.target.id == member.id:
             reason = "Kicked"
@@ -227,17 +222,14 @@ async def on_member_remove(member: discord.Member):
             mod = entry.user.mention
             break
 
-    embed = discord.Embed(
-        title="🔴 Member Left",
-        color=discord.Color.red(),
-        timestamp=datetime.now(timezone.utc)
-    )
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="👤 User", value=f"{member.mention}\n`{member.id}`", inline=False)
+    embed = discord.Embed(title="🔴 Member Left", color=discord.Color.red(), timestamp=datetime.now(timezone.utc))
+    embed.add_field(name="👤 User", value=f"{member} (`{member.id}`)", inline=False)
     embed.add_field(name="⚡ Left By", value=mod if mod else reason, inline=False)
-    embed.add_field(name="🕒 Account Created", value=f"<t:{int(member.created_at.timestamp())}:F>", inline=False)
-    await send_embed(LEAVE_LOG_CHANNEL_ID, embed.title, color=discord.Color.red(),
-                     fields=[(f.name, f.value, f.inline) for f in embed.fields], thumbnail=member.display_avatar.url)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await send_embed(LEAVE_LOG_CHANNEL_ID, embed.title, color=discord.Color.red(), fields=[
+        ("👤 User", f"{member.mention}\n`{member.id}`", False),
+        ("⚡ Left By", mod if mod else reason, False)
+    ], thumbnail=member.display_avatar.url)
 
 # ===================== ROLE LOGGING =====================
 @bot.event
@@ -251,26 +243,60 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             continue
 
         for role in added_roles:
-            embed = discord.Embed(title="➕ Role Added", color=discord.Color.green(), timestamp=datetime.now(timezone.utc))
-            embed.add_field(name="👤 User", value=f"{after.mention}\n`{after.id}`", inline=False)
-            embed.add_field(name="🏷️ Role", value=role.mention, inline=False)
-            embed.add_field(name="🛡️ Added By", value=entry.user.mention, inline=False)
-            embed.add_field(name="🕒 Time", value=f"<t:{int(entry.created_at.timestamp())}:F>", inline=False)
-            await send_embed(SYSTEM_LOG_CHANNEL_ID, embed.title, color=discord.Color.green(),
-                             fields=[(f.name, f.value, f.inline) for f in embed.fields])
+            await send_embed(
+                SYSTEM_LOG_CHANNEL_ID,
+                "➕ Role Added",
+                color=discord.Color.green(),
+                fields=[
+                    ("👤 User", f"{after.mention}\n`{after.id}`", False),
+                    ("🏷️ Role", role.mention, False),
+                    ("🛡️ Added By", entry.user.mention, False),
+                    ("⏰ Time", f"<t:{int(entry.created_at.timestamp())}:F>", False)
+                ]
+            )
 
         for role in removed_roles:
-            embed = discord.Embed(title="➖ Role Removed", color=discord.Color.red(), timestamp=datetime.now(timezone.utc))
-            embed.add_field(name="👤 User", value=f"{after.mention}\n`{after.id}`", inline=False)
-            embed.add_field(name="🏷️ Role", value=role.mention, inline=False)
-            embed.add_field(name="🛡️ Removed By", value=entry.user.mention, inline=False)
-            embed.add_field(name="🕒 Time", value=f"<t:{int(entry.created_at.timestamp())}:F>", inline=False)
-            await send_embed(SYSTEM_LOG_CHANNEL_ID, embed.title, color=discord.Color.red(),
-                             fields=[(f.name, f.value, f.inline) for f in embed.fields])
+            await send_embed(
+                SYSTEM_LOG_CHANNEL_ID,
+                "➖ Role Removed",
+                color=discord.Color.red(),
+                fields=[
+                    ("👤 User", f"{after.mention}\n`{after.id}`", False),
+                    ("🏷️ Role", role.mention, False),
+                    ("🛡️ Removed By", entry.user.mention, False),
+                    ("⏰ Time", f"<t:{int(entry.created_at.timestamp())}:F>", False)
+                ]
+            )
         break
 
+# ===================== VOICE LOGS =====================
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if before.channel != after.channel:
+        if before.channel and before.channel.id in TRACKED_VOICE_CHANNELS:
+            await send_embed(VOICE_LOG_CHANNEL_ID, "🔈 Voice Leave",
+                             color=discord.Color.red(),
+                             fields=[("👤 User", f"{member.mention}\n`{member.id}`", False),
+                                     ("Channel", f"{before.channel.name}", False)])
+        if after.channel and after.channel.id in TRACKED_VOICE_CHANNELS:
+            await send_embed(VOICE_LOG_CHANNEL_ID, "🔊 Voice Join",
+                             color=discord.Color.green(),
+                             fields=[("👤 User", f"{member.mention}\n`{member.id}`", False),
+                                     ("Channel", f"{after.channel.name}", False)])
+
+# ===================== PROTECTED TAG WARNING =====================
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    for role_id in PROTECTED_IDS:
+        if role_id in [r.id for r in message.role_mentions]:
+            await message.reply("⚠️ Please do not tag higher-ups!")
+            await message.add_reaction("⚠️")
+    await bot.process_commands(message)
+
 # ===================== BOT STATUS LOOP =====================
-@tasks.loop(seconds=30)
+@tasks.loop(seconds=10)
 async def update_status():
     global status_message
     channel = get_channel_safe(BOT_STATUS_CHANNEL_ID)
@@ -287,12 +313,5 @@ async def update_status():
     except Exception as e:
         print(f"❌ Failed to update status: {e}")
 
-# ===================== MESSAGE COMMAND =====================
-@bot.tree.command(name="message", description="Send a custom message via bot")
-@app_commands.describe(content="Message content")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def message(interaction: discord.Interaction, content: str):
-    if interaction.user.id not in ALLOWED_USER_IDS:
-        await interaction.response.send_message("❌ You are not allowed to use this.", ephemeral=True)
-        return
-    await interaction.response.send_message(content)
+# ===================== RUN BOT =====================
+bot.run(os.getenv("TOKEN"))

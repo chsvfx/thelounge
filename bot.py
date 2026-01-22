@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import os
 import psutil
 import traceback
-import math
+import asyncio
 
 # ===================== CONFIG =====================
 GUILD_ID = 1351310078849847358
@@ -18,7 +18,6 @@ VERIFY_LOG_CHANNEL_ID = 1462412645150752890
 JOIN_LOG_CHANNEL_ID = 1462412615195164908
 LEAVE_LOG_CHANNEL_ID = 1462412568747573422
 BOT_STATUS_CHANNEL_ID = 1463660427413033093
-
 VOICE_LOG_CHANNEL_ID = 1463842358448623822
 TICKET_CATEGORY_ID = 1462421944170446869
 
@@ -44,8 +43,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ===================== MEMORY =====================
 START_TIME = datetime.now(timezone.utc)
 status_message: discord.Message | None = None
-invite_tracker = {}  # track invites
-tickets_messages = {}  # store ticket messages per guild
+invite_tracker = {}
+tickets_messages = {}
 
 # ===================== HELPERS =====================
 def get_channel_safe(cid: int) -> discord.TextChannel | None:
@@ -65,7 +64,6 @@ def format_uptime() -> str:
     return f"{hours}h {minutes}m {seconds}s"
 
 def calculate_risk(member: discord.Member) -> str:
-    """Returns risk score based on account age and server join history."""
     delta_days = (datetime.now(timezone.utc) - member.created_at).days
     if delta_days < 7:
         return "⚠️ High Risk (New Account)"
@@ -74,7 +72,6 @@ def calculate_risk(member: discord.Member) -> str:
     return "✅ Low Risk"
 
 def is_alt(member: discord.Member) -> str:
-    """Returns alt detection info"""
     return "🚨 Possible Alt" if (datetime.now(timezone.utc) - member.created_at).days < 7 else "✅ Legit Account"
 
 async def send_embed(channel_id: int, title: str, color=discord.Color.green(),
@@ -95,19 +92,17 @@ class VerifyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Verify", style=discord.ButtonStyle.success, custom_id="persistent_verify_button")
+    @discord.ui.button(label="✅ Click here to verify yourself!", style=discord.ButtonStyle.success, custom_id="persistent_verify_button")
     async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.bot:
-            return
         role = interaction.guild.get_role(MEMBER_ROLE_ID)
         if not role:
             await interaction.response.send_message("❌ Member role not found.", ephemeral=True)
             return
         if role in interaction.user.roles:
-            await interaction.response.send_message("ℹ️ Already verified.", ephemeral=True)
+            await interaction.response.send_message("ℹ️ You are already verified.", ephemeral=True)
             return
         await interaction.user.add_roles(role, reason="Server verification")
-        await interaction.response.send_message("✅ You are now verified!", ephemeral=True)
+        await interaction.response.send_message("🎉 You are now verified and have access to the server!", ephemeral=True)
         # log
         await send_embed(
             VERIFY_LOG_CHANNEL_ID,
@@ -125,7 +120,7 @@ class TicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Create Ticket", style=discord.ButtonStyle.blurple, custom_id="persistent_ticket_button")
+    @discord.ui.button(label="🎫 Create Ticket", style=discord.ButtonStyle.blurple, custom_id="persistent_ticket_button")
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id not in ALLOWED_USER_IDS:
             await interaction.response.send_message("❌ You cannot use this command.", ephemeral=True)
@@ -148,13 +143,13 @@ class CloseTicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.red, custom_id="persistent_close_ticket")
+    @discord.ui.button(label="❌ Close Ticket", style=discord.ButtonStyle.red, custom_id="persistent_close_ticket")
     async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
         channel_id = interaction.channel.id
         if channel_id not in tickets_messages:
             await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True)
             return
-        await interaction.response.send_message("🗑️ Ticket will be closed in 5s.", ephemeral=True)
+        await interaction.response.send_message("🗑️ Ticket will be closed in 5 seconds.", ephemeral=True)
         await asyncio.sleep(5)
         await interaction.channel.delete()
         del tickets_messages[channel_id]
@@ -166,7 +161,6 @@ async def on_ready():
     bot.add_view(TicketView())
     bot.add_view(CloseTicketView())
     await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
-    # fetch invites
     guild = bot.get_guild(GUILD_ID)
     if guild:
         for inv in await guild.invites():
@@ -213,13 +207,11 @@ async def on_member_remove(member: discord.Member):
     reason = "Left"
     mod = None
     guild = member.guild
-    # check kick
     async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.kick):
         if entry.target.id == member.id:
             reason = "Kicked"
             mod = entry.user.mention
             break
-    # check ban
     async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.ban):
         if entry.target.id == member.id:
             reason = "Banned"
@@ -236,6 +228,33 @@ async def on_member_remove(member: discord.Member):
     embed.add_field(name="🕒 Created", value=f"<t:{int(member.created_at.timestamp())}:F>", inline=True)
     embed.add_field(name="🤖 Bot?", value="Yes" if member.bot else "No", inline=True)
     await send_embed(LEAVE_LOG_CHANNEL_ID, "🔴 Member Left", fields=[(f.name, f.value, f.inline) for f in embed.fields], thumbnail=member.display_avatar.url)
+
+# ===================== ROLE LOGGING =====================
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    guild = after.guild
+    added_roles = [r for r in after.roles if r not in before.roles]
+    removed_roles = [r for r in before.roles if r not in after.roles]
+
+    try:
+        async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.member_role_update):
+            if entry.target.id != after.id:
+                continue
+            for role in added_roles:
+                await send_embed(SYSTEM_LOG_CHANNEL_ID, "➕ Role Added", color=discord.Color.green(), fields=[
+                    ("👤 User", f"{after} (`{after.id}`)", False),
+                    ("🏷️ Role", role.mention, False),
+                    ("🛡️ Added By", f"{entry.user.mention}", False)
+                ])
+            for role in removed_roles:
+                await send_embed(SYSTEM_LOG_CHANNEL_ID, "➖ Role Removed", color=discord.Color.red(), fields=[
+                    ("👤 User", f"{after} (`{after.id}`)", False),
+                    ("🏷️ Role", role.mention, False),
+                    ("🛡️ Removed By", f"{entry.user.mention}", False)
+                ])
+            break
+    except Exception as e:
+        print(f"❌ Role log error: {e}")
 
 # ===================== VOICE LOGGING =====================
 @bot.event
@@ -259,7 +278,6 @@ async def update_status():
     guild = bot.get_guild(GUILD_ID)
     if not guild:
         return
-
     total_members = sum(1 for m in guild.members if not m.bot)
     total_bots = sum(1 for m in guild.members if m.bot)
     cpu = psutil.cpu_percent()
@@ -299,9 +317,11 @@ async def rules(interaction: discord.Interaction):
 @bot.tree.command(name="verify", description="Verify yourself")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def verify(interaction: discord.Interaction):
-    embed = discord.Embed(title="🎉 Verify to Join",
-                          description="Click the button below to receive the **Member** role.",
-                          color=discord.Color.green())
+    embed = discord.Embed(
+        title="🎉 Verify to Join",
+        description="Click the button below to receive the **Member** role and get full access to the server! ✅\n\nMake sure your account is safe and not a bot/alt.",
+        color=discord.Color.green()
+    )
     await interaction.response.send_message(embed=embed, view=VerifyView())
 
 # ===================== RUN BOT =====================

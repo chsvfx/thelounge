@@ -10,14 +10,13 @@ import traceback
 GUILD_ID = 1351310078849847358
 MEMBER_ROLE_ID = 1386784222781505619
 
-ALLOWED_USER_IDS = [1351310078887858299, 1386779868532047982]
+ALLOWED_USER_IDS = [771432636563324929, 1329386427460358188]
 
 SYSTEM_LOG_CHANNEL_ID = 1462412675295481971
 VERIFY_LOG_CHANNEL_ID = 1462412645150752890
 JOIN_LOG_CHANNEL_ID = 1462412615195164908
 LEAVE_LOG_CHANNEL_ID = 1462412568747573422
 BOT_STATUS_CHANNEL_ID = 1463660427413033093
-
 VOICE_LOG_CHANNEL_ID = 1463842358448623822
 TICKET_CATEGORY_ID = 1462421944170446869
 
@@ -29,20 +28,25 @@ TRACKED_VOICE_CHANNELS = [
     1432491181006127268
 ]
 
-PROTECTED_IDS = ALLOWED_USER_IDS  # IDs that cannot be tagged
+PROTECTED_IDS = [1351310078887858299, 1386779868532047982]  # Admin/Dev/Owner
 
 # ===================== INTENTS =====================
-intents = discord.Intents.all()
+intents = discord.Intents.default()
+intents.members = True
+intents.guilds = True
+intents.messages = True
+intents.message_content = True
+intents.reactions = True
+intents.voice_states = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ===================== MEMORY =====================
 START_TIME = datetime.now(timezone.utc)
 status_message: discord.Message | None = None
-invite_tracker = {}
-tickets_open = {}
+invite_tracker = {}  # track invites
 
 # ===================== HELPERS =====================
-def get_channel(cid: int) -> discord.TextChannel | None:
+def get_channel_safe(cid: int) -> discord.TextChannel | None:
     return bot.get_channel(cid)
 
 def format_account_age(created_at: datetime) -> str:
@@ -58,9 +62,12 @@ def format_uptime() -> str:
     minutes, seconds = divmod(remainder, 60)
     return f"{hours}h {minutes}m {seconds}s"
 
+def is_allowed(user: discord.User) -> bool:
+    return user.id in ALLOWED_USER_IDS
+
 async def send_embed(channel_id: int, title: str, color=discord.Color.green(),
                      fields: list[tuple[str,str,bool]] | None=None, thumbnail: str | None=None):
-    channel = get_channel(channel_id)
+    channel = get_channel_safe(channel_id)
     if not channel:
         return
     embed = discord.Embed(title=title, color=color, timestamp=datetime.now(timezone.utc))
@@ -83,7 +90,8 @@ async def get_status_embed() -> discord.Embed:
 
     embed = discord.Embed(
         title="🤖 Bot Status",
-        color=discord.Color.green(),
+        description="Big, aesthetic statistics of the bot's current state",
+        color=discord.Color.blurple(),
         timestamp=datetime.now(timezone.utc)
     )
     embed.add_field(name="👥 Members", value=f"{total_members}", inline=True)
@@ -94,12 +102,12 @@ async def get_status_embed() -> discord.Embed:
     embed.set_footer(text=f"{bot.user} • Status Update")
     return embed
 
-# ===================== VIEWS =====================
+# ===================== VERIFY VIEW =====================
 class VerifyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="✅ Verify Me", style=discord.ButtonStyle.green, custom_id="persistent_verify_button")
+    @discord.ui.button(label="✅ Verify Yourself", style=discord.ButtonStyle.success, custom_id="persistent_verify_button")
     async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         role = interaction.guild.get_role(MEMBER_ROLE_ID)
         if not role:
@@ -117,84 +125,67 @@ class VerifyView(discord.ui.View):
             fields=[
                 ("👤 User", f"{interaction.user.mention}\n`{interaction.user.id}`", False),
                 ("📅 Account Age", format_account_age(interaction.user.created_at), False),
-                ("🏷️ Role", role.mention, False)
+                ("🏷️ Role", role.mention, False),
+                ("🕒 Verified At", f"<t:{int(datetime.now(timezone.utc).timestamp())}:F>", False)
             ],
             thumbnail=interaction.user.display_avatar.url
         )
 
+# ===================== TICKET VIEW =====================
 class TicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="🎫 Open Ticket", style=discord.ButtonStyle.blurple, custom_id="persistent_ticket_button")
+    @discord.ui.button(label="🎫 Open Ticket", style=discord.ButtonStyle.primary, custom_id="persistent_ticket_button")
     async def ticket_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
+        category = guild.get_channel(TICKET_CATEGORY_ID)
+        existing = discord.utils.get(guild.channels, name=f"ticket-{interaction.user.name}".lower())
+        if existing:
+            await interaction.response.send_message(f"❗ You already have an open ticket: {existing.mention}", ephemeral=True)
+            return
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True)
         }
-        category = guild.get_channel(TICKET_CATEGORY_ID)
-        channel = await guild.create_text_channel(f"ticket-{interaction.user.name}", category=category, overwrites=overwrites)
-        tickets_open[interaction.user.id] = channel.id
-        await channel.send(f"🎫 {interaction.user.mention}, your ticket has been created!")
-        await interaction.response.send_message(f"✅ Ticket created: {channel.mention}", ephemeral=True)
+        channel = await guild.create_text_channel(
+            name=f"ticket-{interaction.user.name}".lower(),
+            category=category,
+            overwrites=overwrites
+        )
+        await interaction.response.send_message(f"🎫 Ticket created: {channel.mention}", ephemeral=True)
+        await channel.send(f"Hello {interaction.user.mention}, please describe your issue. Our staff will respond soon!")
 
 # ===================== COMMANDS =====================
-@bot.tree.command(name="verify", description="Verify yourself")
+@bot.tree.command(name="verify", description="Verify yourself to get access")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def verify(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🎉 Verify to Access",
-        description="Click ✅ to get the **Member** role!\n💡 Ensure your account is not new.",
+        title="🎉 Verify to Join",
+        description="Click the button below to get the **Member** role.\n\n💡 **Note:** Only verified members can see most channels.",
         color=discord.Color.green()
     )
-    await interaction.response.send_message(embed=embed, view=VerifyView())
+    await interaction.response.send_message(embed=embed, view=VerifyView(), ephemeral=True)
 
 @bot.tree.command(name="ticket", description="Open a support ticket")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def ticket(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🎫 Open a Support Ticket",
-        description="Click the button below to open a **ticket**.\nStaff will assist you soon!",
-        color=discord.Color.blurple()
+        title="🎫 Open a Ticket",
+        description="Click the button below to open a support ticket.\n🛠️ Our staff will assist you as soon as possible!",
+        color=discord.Color.orange()
     )
-    await interaction.response.send_message(embed=embed, view=TicketView(), ephemeral=False)
+    await interaction.response.send_message(embed=embed, view=TicketView(), ephemeral=True)
 
-@bot.tree.command(name="clear", description="Clear messages")
-@app_commands.describe(amount="Number of messages")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def clear(interaction: discord.Interaction, amount: int):
-    if interaction.user.id not in ALLOWED_USER_IDS:
-        await interaction.response.send_message("❌ You cannot use this command.", ephemeral=True)
-        return
-    deleted = await interaction.channel.purge(limit=amount)
-    await interaction.response.send_message(f"🧹 Deleted {len(deleted)} messages.", ephemeral=True)
-
-@bot.tree.command(name="message", description="Bot sends a custom message")
-@app_commands.describe(content="Message content")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def message(interaction: discord.Interaction, content: str):
-    if interaction.user.id not in ALLOWED_USER_IDS:
-        await interaction.response.send_message("❌ You cannot use this command.", ephemeral=True)
-        return
-    await interaction.channel.send(content)
-    await interaction.response.send_message("✅ Message sent.", ephemeral=True)
-
-@bot.tree.command(name="test", description="Test all commands")
+@bot.tree.command(name="test", description="Trigger all commands for testing")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def test(interaction: discord.Interaction):
-    if interaction.user.id not in ALLOWED_USER_IDS:
+    if not is_allowed(interaction.user):
         await interaction.response.send_message("❌ You cannot use this command.", ephemeral=True)
         return
-    # Trigger verify
-    await verify(interaction)
-    # Trigger ticket
-    await ticket(interaction)
-    # Trigger message
-    await message(interaction, "This is a test message from /test")
-    # Trigger clear
-    await clear(interaction, 1)
-    await interaction.response.send_message("✅ All commands triggered successfully!", ephemeral=True)
+    await verify.callback(interaction)
+    await ticket.callback(interaction)
+    await interaction.followup.send("✅ All commands triggered.", ephemeral=True)
 
 # ===================== EVENTS =====================
 @bot.event
@@ -202,19 +193,158 @@ async def on_ready():
     bot.add_view(VerifyView())
     bot.add_view(TicketView())
     await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
-    update_status.start()
-    # Fetch invites
     guild = bot.get_guild(GUILD_ID)
     if guild:
         for invite in await guild.invites():
             invite_tracker[invite.code] = invite.uses
+    update_status.start()
     print(f"🟢 Logged in as {bot.user}")
 
-# ===================== STATUS LOOP =====================
-@tasks.loop(seconds=15)
+# ===================== JOIN / LEAVE LOGS =====================
+@bot.event
+async def on_member_join(member):
+    guild = member.guild
+    inviter_name = "Unknown"
+    try:
+        invites_before = invite_tracker.copy()
+        current_invites = await guild.invites()
+        for inv in current_invites:
+            uses_before = invites_before.get(inv.code, 0)
+            if inv.uses > uses_before:
+                inviter_name = inv.inviter.mention
+                invite_tracker[inv.code] = inv.uses
+                break
+    except:
+        pass
+    age_days = (datetime.now(timezone.utc) - member.created_at).days
+    risk = "⚠️ High" if age_days < 7 else "✅ Low"
+    await send_embed(
+        JOIN_LOG_CHANNEL_ID,
+        "🟢 Member Joined",
+        color=discord.Color.green(),
+        fields=[
+            ("👤 User", f"{member.mention}\n`{member.id}`", False),
+            ("📅 Account Created", f"<t:{int(member.created_at.timestamp())}:F>", False),
+            ("📊 Risk Score", risk, False),
+            ("🚨 Alt Detection", "✅" if age_days >= 7 else "❌ New account", False),
+            ("📥 Invited By", inviter_name, False),
+            ("💻 Account Age", format_account_age(member.created_at), False),
+        ],
+        thumbnail=member.display_avatar.url
+    )
+
+@bot.event
+async def on_member_remove(member):
+    guild = member.guild
+    reason = "Left voluntarily"
+    mod = None
+    async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.kick):
+        if entry.target.id == member.id:
+            reason = "Kicked"
+            mod = entry.user.mention
+            break
+    async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.ban):
+        if entry.target.id == member.id:
+            reason = "Banned"
+            mod = entry.user.mention
+            break
+    await send_embed(
+        LEAVE_LOG_CHANNEL_ID,
+        "🔴 Member Left",
+        color=discord.Color.red(),
+        fields=[
+            ("👤 User", f"{member.mention}\n`{member.id}`", False),
+            ("⚡ Left By", mod if mod else reason, False),
+            ("💻 Account Age", format_account_age(member.created_at), False),
+            ("📅 Account Created", f"<t:{int(member.created_at.timestamp())}:F>", False),
+        ],
+        thumbnail=member.display_avatar.url
+    )
+
+# ===================== ROLE LOGS =====================
+@bot.event
+async def on_member_update(before, after):
+    guild = after.guild
+    added_roles = [r for r in after.roles if r not in before.roles]
+    removed_roles = [r for r in before.roles if r not in after.roles]
+    async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.member_role_update):
+        if entry.target.id != after.id:
+            continue
+        for role in added_roles:
+            await send_embed(
+                SYSTEM_LOG_CHANNEL_ID,
+                "➕ Role Added",
+                color=discord.Color.green(),
+                fields=[
+                    ("👤 User", f"{after.mention}\n`{after.id}`", False),
+                    ("🏷️ Role", role.mention, False),
+                    ("🛡️ Added By", entry.user.mention, False),
+                    ("🕒 Time", f"<t:{int(entry.created_at.timestamp())}:F>", False)
+                ]
+            )
+        for role in removed_roles:
+            await send_embed(
+                SYSTEM_LOG_CHANNEL_ID,
+                "➖ Role Removed",
+                color=discord.Color.red(),
+                fields=[
+                    ("👤 User", f"{after.mention}\n`{after.id}`", False),
+                    ("🏷️ Role", role.mention, False),
+                    ("🛡️ Removed By", entry.user.mention, False),
+                    ("🕒 Time", f"<t:{int(entry.created_at.timestamp())}:F>", False)
+                ]
+            )
+        break
+
+# ===================== VOICE LOGS =====================
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if before.channel == after.channel:
+        return
+    if before.channel and before.channel.id in TRACKED_VOICE_CHANNELS:
+        await send_embed(
+            VOICE_LOG_CHANNEL_ID,
+            "🔴 Voice Channel Left",
+            color=discord.Color.red(),
+            fields=[
+                ("👤 User", f"{member.mention}\n`{member.id}`", False),
+                ("🎙️ Channel Left", before.channel.mention, False),
+                ("🕒 Time", f"<t:{int(datetime.now(timezone.utc).timestamp())}:F>", False)
+            ],
+            thumbnail=member.display_avatar.url
+        )
+    if after.channel and after.channel.id in TRACKED_VOICE_CHANNELS:
+        await send_embed(
+            VOICE_LOG_CHANNEL_ID,
+            "🟢 Voice Channel Joined",
+            color=discord.Color.green(),
+            fields=[
+                ("👤 User", f"{member.mention}\n`{member.id}`", False),
+                ("🎙️ Channel Joined", after.channel.mention, False),
+                ("🕒 Time", f"<t:{int(datetime.now(timezone.utc).timestamp())}:F>", False)
+            ],
+            thumbnail=member.display_avatar.url
+        )
+
+# ===================== MESSAGE TAG WARNING =====================
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    for user in message.mentions:
+        if user.id in PROTECTED_IDS:
+            try:
+                await message.add_reaction("⚠️")
+                await message.channel.send(f"❌ {message.author.mention}, please do not tag my higher-up staff!")
+            except:
+                pass
+    await bot.process_commands(message)
+
+# ===================== BOT STATUS =====================
+@tasks.loop(seconds=10)
 async def update_status():
     global status_message
-    channel = get_channel(BOT_STATUS_CHANNEL_ID)
+    channel = get_channel_safe(BOT_STATUS_CHANNEL_ID)
     if not channel:
         return
     embed = await get_status_embed()

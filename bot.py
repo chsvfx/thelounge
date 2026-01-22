@@ -10,7 +10,7 @@ import traceback
 GUILD_ID = 1351310078849847358
 MEMBER_ROLE_ID = 1386784222781505619
 
-ALLOWED_USER_IDS = [771432636563324929, 1329386427460358188]
+ALLOWED_USER_IDS = [1351310078887858299, 1386779868532047982]
 
 SYSTEM_LOG_CHANNEL_ID = 1462412675295481971
 VERIFY_LOG_CHANNEL_ID = 1462412645150752890
@@ -98,7 +98,6 @@ async def get_status_embed() -> discord.Embed:
 class VerifyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(discord.ui.Button(label="✅ Verify Me", style=discord.ButtonStyle.green, custom_id="persistent_verify_button"))
 
     @discord.ui.button(label="✅ Verify Me", style=discord.ButtonStyle.green, custom_id="persistent_verify_button")
     async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -126,11 +125,9 @@ class VerifyView(discord.ui.View):
 class TicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(discord.ui.Button(label="🎫 Open Ticket", style=discord.ButtonStyle.blurple, custom_id="persistent_ticket_button"))
 
     @discord.ui.button(label="🎫 Open Ticket", style=discord.ButtonStyle.blurple, custom_id="persistent_ticket_button")
     async def ticket_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Create ticket channel
         guild = interaction.guild
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
@@ -143,12 +140,12 @@ class TicketView(discord.ui.View):
         await interaction.response.send_message(f"✅ Ticket created: {channel.mention}", ephemeral=True)
 
 # ===================== COMMANDS =====================
-@bot.tree.command(name="verify", description="Verify yourself to get access")
+@bot.tree.command(name="verify", description="Verify yourself")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def verify(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🎉 Verify to Access the Server",
-        description="Click the ✅ button below to get the **Member** role!\n\n💡 Make sure your account is not new and follows server rules.",
+        title="🎉 Verify to Access",
+        description="Click ✅ to get the **Member** role!\n💡 Ensure your account is not new.",
         color=discord.Color.green()
     )
     await interaction.response.send_message(embed=embed, view=VerifyView())
@@ -157,14 +154,14 @@ async def verify(interaction: discord.Interaction):
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def ticket(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🎫 Need Help?",
-        description="Click the button below to open a **support ticket**.\nOur staff will assist you as soon as possible! 🛠️",
+        title="🎫 Open a Support Ticket",
+        description="Click the button below to open a **ticket**.\nStaff will assist you soon!",
         color=discord.Color.blurple()
     )
     await interaction.response.send_message(embed=embed, view=TicketView(), ephemeral=False)
 
-@bot.tree.command(name="clear", description="Clear messages in a channel")
-@app_commands.describe(amount="Number of messages to delete")
+@bot.tree.command(name="clear", description="Clear messages")
+@app_commands.describe(amount="Number of messages")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def clear(interaction: discord.Interaction, amount: int):
     if interaction.user.id not in ALLOWED_USER_IDS:
@@ -183,13 +180,21 @@ async def message(interaction: discord.Interaction, content: str):
     await interaction.channel.send(content)
     await interaction.response.send_message("✅ Message sent.", ephemeral=True)
 
-@bot.tree.command(name="test", description="Test command to see if bot works")
+@bot.tree.command(name="test", description="Test all commands")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def test(interaction: discord.Interaction):
     if interaction.user.id not in ALLOWED_USER_IDS:
         await interaction.response.send_message("❌ You cannot use this command.", ephemeral=True)
         return
-    await interaction.response.send_message("✅ Bot is online and commands work!", ephemeral=True)
+    # Trigger verify
+    await verify(interaction)
+    # Trigger ticket
+    await ticket(interaction)
+    # Trigger message
+    await message(interaction, "This is a test message from /test")
+    # Trigger clear
+    await clear(interaction, 1)
+    await interaction.response.send_message("✅ All commands triggered successfully!", ephemeral=True)
 
 # ===================== EVENTS =====================
 @bot.event
@@ -204,36 +209,6 @@ async def on_ready():
         for invite in await guild.invites():
             invite_tracker[invite.code] = invite.uses
     print(f"🟢 Logged in as {bot.user}")
-
-@bot.event
-async def on_member_join(member: discord.Member):
-    # Invite detection
-    guild = member.guild
-    inviter_name = "Unknown"
-    try:
-        current_invites = await guild.invites()
-        for inv in current_invites:
-            if inv.uses > invite_tracker.get(inv.code, 0):
-                inviter_name = inv.inviter.mention
-                invite_tracker[inv.code] = inv.uses
-                break
-    except:
-        pass
-
-    embed = discord.Embed(title="🟢 Member Joined", color=discord.Color.green(), timestamp=datetime.now(timezone.utc))
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="👤 User", value=f"{member.mention}\n`{member.id}`", inline=False)
-    embed.add_field(name="📅 Account Age", value=format_account_age(member.created_at), inline=False)
-    embed.add_field(name="🕒 Created At", value=f"<t:{int(member.created_at.timestamp())}:F>", inline=False)
-    embed.add_field(name="🚨 Alt Risk", value="⚠️ High risk" if (datetime.now(timezone.utc)-member.created_at).days < 7 else "✅ Safe", inline=False)
-    embed.add_field(name="📥 Invite Used", value=inviter_name, inline=False)
-    await send_embed(JOIN_LOG_CHANNEL_ID, embed.title, color=discord.Color.green(), fields=[
-        ("👤 User", f"{member.mention}\n`{member.id}`", False),
-        ("📅 Account Age", format_account_age(member.created_at), False),
-        ("🕒 Created At", f"<t:{int(member.created_at.timestamp())}:F>", False),
-        ("🚨 Alt Risk", "⚠️ High risk" if (datetime.now(timezone.utc)-member.created_at).days < 7 else "✅ Safe", False),
-        ("📥 Invite Used", inviter_name, False)
-    ], thumbnail=member.display_avatar.url)
 
 # ===================== STATUS LOOP =====================
 @tasks.loop(seconds=15)

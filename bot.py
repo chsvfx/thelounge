@@ -4,6 +4,7 @@ from discord import app_commands
 from datetime import datetime, timezone
 import os
 import psutil
+import traceback
 
 # ===================== CONFIG =====================
 GUILD_ID = 1351310078849847358
@@ -45,45 +46,78 @@ status_message: discord.Message | None = None
 def is_allowed(interaction: discord.Interaction) -> bool:
     return interaction.user.id in ALLOWED_USER_IDS
 
-def format_uptime() -> str:
+def uptime():
     delta = datetime.now(timezone.utc) - START_TIME
     h, r = divmod(int(delta.total_seconds()), 3600)
     m, s = divmod(r, 60)
     return f"{h}h {m}m {s}s"
 
-# ===================== VERIFY VIEW =====================
+async def log_embed(channel_id: int, title: str, color, fields, thumb=None):
+    channel = bot.get_channel(channel_id)
+    if not channel:
+        return
+    embed = discord.Embed(
+        title=title,
+        color=color,
+        timestamp=datetime.now(timezone.utc)
+    )
+    for n, v in fields:
+        embed.add_field(name=n, value=v, inline=False)
+    if thumb:
+        embed.set_thumbnail(url=thumb)
+    await channel.send(embed=embed)
+
+# ===================== VERIFY (PERSISTENT) =====================
 class VerifyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(
         label="Verify",
-        style=discord.ButtonStyle.success,
         emoji="✅",
+        style=discord.ButtonStyle.success,
         custom_id="persistent_verify_button"
     )
     async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
         role = interaction.guild.get_role(MEMBER_ROLE_ID)
+
         if role in interaction.user.roles:
-            await interaction.response.send_message("ℹ️ You are already verified.", ephemeral=True)
+            await interaction.response.send_message("ℹ️ Already verified.", ephemeral=True)
             return
 
-        await interaction.user.add_roles(role)
+        await interaction.user.add_roles(role, reason="User verification")
         await interaction.response.send_message("🎉 You are now verified!", ephemeral=True)
 
-# ===================== TICKET SYSTEM =====================
+        await log_embed(
+            VERIFY_LOG_CHANNEL_ID,
+            "✅ Member Verified",
+            discord.Color.green(),
+            [
+                ("👤 User", f"{interaction.user.mention}\n`{interaction.user.id}`"),
+                ("📅 Account Created", f"<t:{int(interaction.user.created_at.timestamp())}:F>")
+            ],
+            interaction.user.display_avatar.url
+        )
+
+# ===================== TICKETS (PERSISTENT) =====================
 class TicketView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
 
-    @discord.ui.button(label="Open Ticket", emoji="🎫", style=discord.ButtonStyle.primary)
+    @discord.ui.button(
+        label="Open Ticket",
+        emoji="🎫",
+        style=discord.ButtonStyle.primary,
+        custom_id="persistent_ticket_open"
+    )
     async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         category = interaction.guild.get_channel(TICKET_CATEGORY_ID)
 
         for ch in category.text_channels:
             if ch.topic == str(interaction.user.id):
                 await interaction.response.send_message(
-                    "❌ You already have an open ticket.", ephemeral=True
+                    "❌ You already have an open ticket.",
+                    ephemeral=True
                 )
                 return
 
@@ -94,15 +128,15 @@ class TicketView(discord.ui.View):
         }
 
         channel = await interaction.guild.create_text_channel(
-            name=f"ticket-{interaction.user.name}",
+            f"ticket-{interaction.user.name}",
             category=category,
             topic=str(interaction.user.id),
             overwrites=overwrites
         )
 
         embed = discord.Embed(
-            title="🎫 Ticket Created",
-            description="A staff member will assist you shortly.\n\n🔒 **Click the button below to close this ticket.**",
+            title="🎫 Ticket Opened",
+            description="A staff member will assist you shortly.\n\n🔒 Use the button below to close this ticket.",
             color=discord.Color.green()
         )
 
@@ -111,9 +145,14 @@ class TicketView(discord.ui.View):
 
 class CloseTicketView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
 
-    @discord.ui.button(label="Close Ticket", emoji="🔒", style=discord.ButtonStyle.danger)
+    @discord.ui.button(
+        label="Close Ticket",
+        emoji="🔒",
+        style=discord.ButtonStyle.danger,
+        custom_id="persistent_ticket_close"
+    )
     async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("🔒 Closing ticket...", ephemeral=True)
         await interaction.channel.delete()
@@ -134,11 +173,37 @@ async def ticket(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed, view=TicketView())
 
+# ===================== JOIN / LEAVE LOGS =====================
+@bot.event
+async def on_member_join(member):
+    await log_embed(
+        JOIN_LOG_CHANNEL_ID,
+        "🟢 Member Joined",
+        discord.Color.green(),
+        [
+            ("👤 User", f"{member.mention}\n`{member.id}`"),
+            ("📅 Account Created", f"<t:{int(member.created_at.timestamp())}:F>")
+        ],
+        member.display_avatar.url
+    )
+
+@bot.event
+async def on_member_remove(member):
+    await log_embed(
+        LEAVE_LOG_CHANNEL_ID,
+        "🔴 Member Left",
+        discord.Color.red(),
+        [
+            ("👤 User", f"{member.mention}\n`{member.id}`")
+        ],
+        member.display_avatar.url
+    )
+
 # ===================== VOICE LOGS =====================
 @bot.event
 async def on_voice_state_update(member, before, after):
-    def tracked(ch):
-        return ch and ch.id in TRACKED_VOICE_CHANNELS
+    def tracked(c):
+        return c and c.id in TRACKED_VOICE_CHANNELS
 
     if not tracked(before.channel) and not tracked(after.channel):
         return
@@ -162,59 +227,55 @@ async def on_voice_state_update(member, before, after):
         color=discord.Color.blurple(),
         timestamp=datetime.now(timezone.utc)
     )
-    embed.add_field(name="👤 User", value=member.mention, inline=False)
-    embed.add_field(name="⚡ Action", value=action, inline=False)
-    embed.add_field(name="🔊 Channel", value=target, inline=False)
+    embed.add_field(name="👤 User", value=member.mention)
+    embed.add_field(name="⚡ Action", value=action)
+    embed.add_field(name="🔊 Channel", value=target)
 
     await channel.send(embed=embed)
 
-# ===================== BOT STATUS (BIG & CLEAN) =====================
-@tasks.loop(seconds=0)
+# ===================== BOT STATUS =====================
+@tasks.loop(seconds=30)
 async def update_status():
     global status_message
-    channel = bot.get_channel(BOT_STATUS_CHANNEL_ID)
-    if not channel:
-        return
-
-    guild = bot.get_guild(GUILD_ID)
-    members = len([m for m in guild.members if not m.bot])
-    bots = len([m for m in guild.members if m.bot])
-
-    cpu = psutil.cpu_percent()
-    mem = psutil.virtual_memory()
-    used_mb = mem.used // (1024 * 1024)
-    total_mb = mem.total // (1024 * 1024)
-
-    embed = discord.Embed(
-        title="🤖 Bot Status",
-        color=discord.Color.green(),
-        timestamp=datetime.now(timezone.utc)
-    )
-
-    embed.add_field(name="👥 Members", value=f"**{members}**", inline=True)
-    embed.add_field(name="🤖 Bots", value=f"**{bots}**", inline=True)
-    embed.add_field(name="⏱️ Uptime", value=f"**{format_uptime()}**", inline=False)
-    embed.add_field(name="⚡ CPU Usage", value=f"**{cpu}%**", inline=True)
-    embed.add_field(
-        name="💾 Memory Usage",
-        value=f"**{mem.percent}%** ({used_mb}MB / {total_mb}MB)",
-        inline=False
-    )
-
-    embed.set_footer(text=f"{bot.user} • Status Update")
-
     try:
+        channel = bot.get_channel(BOT_STATUS_CHANNEL_ID)
+        guild = bot.get_guild(GUILD_ID)
+        if not channel or not guild:
+            return
+
+        members = len([m for m in guild.members if not m.bot])
+        bots = len([m for m in guild.members if m.bot])
+
+        mem = psutil.virtual_memory()
+        embed = discord.Embed(
+            title="🤖 Bot Status",
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        embed.add_field(name="👥 Members", value=f"**{members}**")
+        embed.add_field(name="🤖 Bots", value=f"**{bots}**")
+        embed.add_field(name="⏱️ Uptime", value=f"**{uptime()}**")
+        embed.add_field(name="⚡ CPU Usage", value=f"**{psutil.cpu_percent()}%**")
+        embed.add_field(
+            name="💾 Memory Usage",
+            value=f"**{mem.percent}%** ({mem.used//1024//1024}MB / {mem.total//1024//1024}MB)"
+        )
+        embed.set_footer(text=f"{bot.user} • Status Update")
+
         if status_message is None:
             status_message = await channel.send(embed=embed)
         else:
             await status_message.edit(embed=embed)
     except:
-        pass
+        pass  # NO SYSTEM LOG SPAM
 
 # ===================== READY =====================
 @bot.event
 async def on_ready():
     bot.add_view(VerifyView())
+    bot.add_view(TicketView())
+    bot.add_view(CloseTicketView())
+
     await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
     update_status.start()
     print(f"🟢 Logged in as {bot.user}")

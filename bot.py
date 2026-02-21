@@ -18,6 +18,7 @@ JOIN_LOG_CHANNEL_ID = 1462412615195164908
 LEAVE_LOG_CHANNEL_ID = 1462412568747573422
 BOT_STATUS_CHANNEL_ID = 1463660427413033093
 VOICE_LOG_CHANNEL_ID = 1463842358448623822
+MESSAGE_LOG_CHANNEL_ID = 1463842358448623822  # Change this to your message logs channel
 TICKET_CATEGORY_ID = 1462421944170446869
 
 TRACKED_VOICE_CHANNELS = [
@@ -177,15 +178,58 @@ async def ticket(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=embed, view=TicketView(), ephemeral=True)
 
-@bot.tree.command(name="test", description="Trigger all commands for testing")
+@bot.tree.command(name="8ball", description="Ask the magic 8 ball a question")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
-async def test(interaction: discord.Interaction):
-    if not is_allowed(interaction.user):
-        await interaction.response.send_message("❌ You cannot use this command.", ephemeral=True)
+async def eightball(interaction: discord.Interaction, question: str):
+    responses = ["Yes, definitely", "No, not at all", "Ask again later", "Absolutely", "Cannot predict now", "Don't count on it", "It is certain", "Very doubtful", "Outlook good", "Signs point to yes"]
+    import random
+    response = random.choice(responses)
+    embed = discord.Embed(title="🎱 Magic 8 Ball", description=f"**Q:** {question}\n\n**A:** {response}", color=discord.Color.purple())
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="dice", description="Roll a dice")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+@app_commands.describe(sides="Number of sides (default: 6)")
+async def dice(interaction: discord.Interaction, sides: int = 6):
+    import random
+    if sides < 2 or sides > 100:
+        await interaction.response.send_message("❌ Dice must have 2-100 sides.", ephemeral=True)
         return
-    await verify.callback(interaction)
-    await ticket.callback(interaction)
-    await interaction.followup.send("✅ All commands triggered.", ephemeral=True)
+    roll = random.randint(1, sides)
+    embed = discord.Embed(title="🎲 Dice Roll", description=f"You rolled a **d{sides}** and got **{roll}**!", color=discord.Color.gold())
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="coinflip", description="Flip a coin")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def coinflip(interaction: discord.Interaction):
+    import random
+    result = random.choice(["Heads", "Tails"])
+    emoji = "🪙" if result == "Heads" else "🪙"
+    embed = discord.Embed(title="Coin Flip", description=f"{emoji} **{result}**!", color=discord.Color.silver())
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="rps", description="Play rock, paper, scissors")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+@app_commands.describe(choice="Your choice: rock, paper, or scissors")
+async def rps(interaction: discord.Interaction, choice: str):
+    import random
+    choices = ["rock", "paper", "scissors"]
+    choice = choice.lower()
+    if choice not in choices:
+        await interaction.response.send_message("❌ Choose: rock, paper, or scissors", ephemeral=True)
+        return
+    bot_choice = random.choice(choices)
+    outcomes = {
+        ("rock", "scissors"): "🎉 You win!",
+        ("scissors", "paper"): "🎉 You win!",
+        ("paper", "rock"): "🎉 You win!",
+        ("rock", "rock"): "🤝 It's a tie!",
+        ("paper", "paper"): "🤝 It's a tie!",
+        ("scissors", "scissors"): "🤝 It's a tie!"
+    }
+    result = outcomes.get((choice, bot_choice), "❌ Bot wins!")
+    embed = discord.Embed(title="Rock, Paper, Scissors", description=f"You: **{choice.upper()}**\nBot: **{bot_choice.upper()}**\n\n{result}", color=discord.Color.blue())
+    await interaction.response.send_message(embed=embed)
 
 # ===================== EVENTS =====================
 @bot.event
@@ -325,6 +369,42 @@ async def on_voice_state_update(member, before, after):
             ],
             thumbnail=member.display_avatar.url
         )
+
+# ===================== MESSAGE LOGGING =====================
+@bot.event
+async def on_message_delete(message):
+    if message.author.bot:
+        return
+    await send_embed(
+        MESSAGE_LOG_CHANNEL_ID,
+        "🗑️ Message Deleted",
+        color=discord.Color.red(),
+        fields=[
+            ("👤 Author", f"{message.author.mention}\n`{message.author.id}`", False),
+            ("💬 Content", message.content[:1024] if message.content else "(no text)", False),
+            ("📍 Channel", message.channel.mention, False),
+            ("🕒 Time", f"<t:{int(message.created_at.timestamp())}:F>", False)
+        ],
+        thumbnail=message.author.display_avatar.url
+    )
+
+@bot.event
+async def on_message_edit(before, after):
+    if before.author.bot or before.content == after.content:
+        return
+    await send_embed(
+        MESSAGE_LOG_CHANNEL_ID,
+        "✏️ Message Edited",
+        color=discord.Color.orange(),
+        fields=[
+            ("👤 Author", f"{before.author.mention}\n`{before.author.id}`", False),
+            ("📝 Before", before.content[:1024] if before.content else "(no text)", False),
+            ("📝 After", after.content[:1024] if after.content else "(no text)", False),
+            ("📍 Channel", before.channel.mention, False),
+            ("🕒 Time", f"<t:{int(before.edited_at.timestamp() if before.edited_at else datetime.now(timezone.utc).timestamp())}:F>", False)
+        ],
+        thumbnail=before.author.display_avatar.url
+    )
 
 # ===================== MESSAGE TAG WARNING =====================
 @bot.event

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import os
 import psutil
 import traceback
+import random
 
 # ===================== CONFIG =====================
 GUILD_ID = 1351310078849847358
@@ -18,7 +19,7 @@ JOIN_LOG_CHANNEL_ID = 1462412615195164908
 LEAVE_LOG_CHANNEL_ID = 1462412568747573422
 BOT_STATUS_CHANNEL_ID = 1463660427413033093
 VOICE_LOG_CHANNEL_ID = 1463842358448623822
-MESSAGE_LOG_CHANNEL_ID = 1463842358448623822  # Change this to your message logs channel
+MESSAGE_LOG_CHANNEL_ID = 1462412675295481971  # Change this to your message logs channel
 TICKET_CATEGORY_ID = 1462421944170446869
 
 TRACKED_VOICE_CHANNELS = [
@@ -180,9 +181,9 @@ async def ticket(interaction: discord.Interaction):
 
 @bot.tree.command(name="8ball", description="Ask the magic 8 ball a question")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
+@app_commands.describe(question="Your question for the magic 8 ball")
 async def eightball(interaction: discord.Interaction, question: str):
     responses = ["Yes, definitely", "No, not at all", "Ask again later", "Absolutely", "Cannot predict now", "Don't count on it", "It is certain", "Very doubtful", "Outlook good", "Signs point to yes"]
-    import random
     response = random.choice(responses)
     embed = discord.Embed(title="🎱 Magic 8 Ball", description=f"**Q:** {question}\n\n**A:** {response}", color=discord.Color.purple())
     await interaction.response.send_message(embed=embed)
@@ -191,7 +192,6 @@ async def eightball(interaction: discord.Interaction, question: str):
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 @app_commands.describe(sides="Number of sides (default: 6)")
 async def dice(interaction: discord.Interaction, sides: int = 6):
-    import random
     if sides < 2 or sides > 100:
         await interaction.response.send_message("❌ Dice must have 2-100 sides.", ephemeral=True)
         return
@@ -202,9 +202,8 @@ async def dice(interaction: discord.Interaction, sides: int = 6):
 @bot.tree.command(name="coinflip", description="Flip a coin")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def coinflip(interaction: discord.Interaction):
-    import random
     result = random.choice(["Heads", "Tails"])
-    emoji = "🪙" if result == "Heads" else "🪙"
+    emoji = "🪙"
     embed = discord.Embed(title="Coin Flip", description=f"{emoji} **{result}**!", color=discord.Color.silver())
     await interaction.response.send_message(embed=embed)
 
@@ -212,7 +211,6 @@ async def coinflip(interaction: discord.Interaction):
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 @app_commands.describe(choice="Your choice: rock, paper, or scissors")
 async def rps(interaction: discord.Interaction, choice: str):
-    import random
     choices = ["rock", "paper", "scissors"]
     choice = choice.lower()
     if choice not in choices:
